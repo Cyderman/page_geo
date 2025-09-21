@@ -1,9 +1,11 @@
 {
   "name": "streamlit-geo-audit",
   "version": "1.0.0",
-  "dependencies": {},
+  "dependencies": {
+    "dummy": "*"
+  },
   "scripts": {
-    "postinstall": "playwright install --with-deps chromium"
+    "postinstall": "playwright install chromium"
   }
 }
 
