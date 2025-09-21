@@ -1,3 +1,17 @@
+import os
+import subprocess
+import streamlit as st
+
+# 🔧 Ensure Playwright Chromium is installed at runtime
+if not os.path.exists("/home/appuser/.cache/ms-playwright"):
+    st.warning("Installing Playwright Chromium runtime (first run may take up to 40s)...")
+    try:
+        subprocess.run(["playwright", "install", "--with-deps", "chromium"], check=True)
+        st.success("✅ Playwright Chromium installed successfully.")
+    except Exception as e:
+        st.error(f"❌ Failed to install Playwright Chromium: {e}")
+
+
 import asyncio
 import json
 from typing import Optional, Dict, List
@@ -452,4 +466,5 @@ if st.button("Run Analysis", type="primary"):
         st.subheader("Consolidated Results (7 areas)")
         consolidated = synthesize_justifications_and_recommendations(results_df, debug)
         st.dataframe(consolidated, use_container_width=True)
+
 
