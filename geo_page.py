@@ -1,4 +1,3 @@
-import asyncio
 import json
 from typing import Optional, Dict, List
 
@@ -7,7 +6,6 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 from openai import OpenAI
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 # ─────────────────────────────────────────────────────────────
 # 0) Config
@@ -71,29 +69,14 @@ audit_scoring_context_json = {
 # ─────────────────────────────────────────────────────────────
 # 2) Utilities
 # ─────────────────────────────────────────────────────────────
-def dbg(enabled: bool, *args):
-    if enabled:
-        st.write(*args)
-
 def normalize_url(url: str) -> str:
     url = url.strip()
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
-    # Prefer non-www to reduce bot-protection edge cases
     scheme, rest = url.split("://", 1)
     if rest.startswith("www."):
         rest = rest[4:]
     return f"{scheme}://{rest}"
-
-def run_async(coro):
-    try:
-        return asyncio.run(coro)
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
 
 def parse_html_to_dict(html: str) -> Dict[str, object]:
     soup = BeautifulSoup(html, "html.parser")
@@ -114,74 +97,34 @@ def parse_html_to_dict(html: str) -> Dict[str, object]:
     }
 
 # ─────────────────────────────────────────────────────────────
-# 3) Fetchers (Playwright + requests fallback) with visible errors
+# 3) Requests-only fetcher
 # ─────────────────────────────────────────────────────────────
-async def fetch_with_playwright(url: str, debug: bool) -> Optional[str]:
+def fetch_webpage_rich_content(url: str, debug: bool) -> Optional[Dict[str, object]]:
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            await page.set_extra_http_headers({
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                )
-            })
-            try:
-                await page.goto(url, timeout=45000)
-                await page.wait_for_selector("body", timeout=15000)
-                html = await page.content()
-                await browser.close()
-                dbg(debug, f"✅ Playwright HTML length: {len(html)}")
-                return html
-            except PlaywrightTimeoutError:
-                st.error(f"⏱ Timeout loading {url}")
-                await browser.close()
-                return None
-            except Exception as e:
-                st.error(f"❌ Playwright navigation error: {e}")
-                await browser.close()
-                return None
-    except Exception as e:
-        st.error(f"❌ Playwright launch error: {e}")
-        return None
-
-def fetch_with_requests(url: str, debug: bool) -> Optional[str]:
-    try:
-        resp = requests.get(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"},
-            timeout=25,
-            allow_redirects=True,
-        )
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        resp = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
         if resp.status_code >= 400:
             st.error(f"❌ requests status {resp.status_code} for {url}")
             return None
-        dbg(debug, f"✅ requests HTML length: {len(resp.text)}")
-        return resp.text
+        html = resp.text
+        if debug:
+            st.info(f"✅ requests HTML length: {len(html)}")
+        data = parse_html_to_dict(html)
+        if len(data["text"].strip()) < 100:
+            st.warning("⚠ Page fetched but contains very little text.")
+        return data
     except Exception as e:
         st.error(f"❌ requests error: {e}")
         return None
 
-async def fetch_webpage_rich_content(url: str, debug: bool) -> Optional[Dict[str, object]]:
-    st.info(f"🌐 Fetching: {url}")
-    html = await fetch_with_playwright(url, debug)
-    if html is None:
-        st.warning("Playwright failed; trying requests fallback…")
-        html = fetch_with_requests(url, debug)
-        if html is None:
-            return None
-    data = parse_html_to_dict(html)
-    if len(data["text"].strip()) < 100:
-        st.warning("⚠ Page fetched but contains very little text (JS-heavy or thin content).")
-    dbg(debug, f"Title: {data['title']}")
-    dbg(debug, f"Meta: {data['meta_description'][:160]}…")
-    dbg(debug, f"Text chars: {len(data['text'])}")
-    return data
-
 # ─────────────────────────────────────────────────────────────
-# 4) Hidden: semantic continuum (theme calibration)
+# 4) Semantic continuum
 # ─────────────────────────────────────────────────────────────
 def generate_theme_calibration(topic: str, prompt: str, debug: bool) -> str:
     sys = "You are an expert in semantic similarity and thematic relevance."
@@ -196,11 +139,12 @@ Return 1–3 lines only.
         messages=[{"role": "system", "content": sys}, {"role": "user", "content": usr}],
     )
     continuum = resp.choices[0].message.content.strip()
-    dbg(debug, f"(hidden continuum) {continuum}")
+    if debug:
+        st.write(f"(hidden continuum) {continuum}")
     return continuum
 
 # ─────────────────────────────────────────────────────────────
-# 5) Query fan-out (unbranded variants)
+# 5) Query fan-out
 # ─────────────────────────────────────────────────────────────
 def generate_unbranded_queries(prompt: str, debug: bool) -> List[str]:
     sys = "Generate 10 unbranded three-word queries. One per line. No bullets."
@@ -211,11 +155,12 @@ def generate_unbranded_queries(prompt: str, debug: bool) -> List[str]:
     )
     lines = [l.strip(" .") for l in resp.choices[0].message.content.split("\n") if l.strip()]
     lines = lines[:10]
-    dbg(debug, f"Fan-out ({len(lines)}): {lines}")
+    if debug:
+        st.write(f"Fan-out ({len(lines)}): {lines}")
     return lines
 
 # ─────────────────────────────────────────────────────────────
-# 6) Build audit context (kept, with continuum applied)
+# 6) Build audit context
 # ─────────────────────────────────────────────────────────────
 def build_audit_context(theme_calibration: str) -> str:
     return (
@@ -230,47 +175,31 @@ def build_audit_context(theme_calibration: str) -> str:
         "given specific considerations you need to bear in mind for maximising visibility to LLMs. \n"
         "</objective> \n\n"
         "<task> \n"
-        "Your audit should return the following:\n"
-        "Score the content against each of the critera areas out of 10 (integer values only) using the provided scoring guidance for each area, "
-        "and strictly within the context and perceived intent of the user query. "
-        "Generate also a one-liner justification for the score given.\n "
-        "And finally a one-liner action-to-take for a quick win improvement to the site content.\n"
-        "Be sure to keep a professional tone and be objective. \n"
+        "Score the content against each of the criteria areas out of 10, give a one-liner justification, and a one-liner action-to-take.\n"
+        "Be professional and objective.\n"
         "</task> \n\n"
         "<scoring calibration> \n"
-        "A score of 0 reflects that none of the good examples are present, and many of the bad examples are present, "
-        "or that the content is not relevant in answering the user query. "
-        "A score of 10 reflects that most or all of the good examples are present, and none or very few of the bad examples are present.\n"
-        "Where the theme or subject of the user query intent and the theme of the content does not align, all area scores shall be "
-        "detrimented, even if good examples exist for that area. Do this as follows: \n"
-        "To each score, apply a multiplier (between 0 and 1) based specifically on the relevance of the content theme to "
-        "the theme of the user search query. Use the following examples of theme alignment to help semantically determine this multiplier: \n"
         f"{theme_calibration}"
         "</scoring calibration> \n\n"
         "<extra input> \n"
-        "Here is a json object detailing guidance for each of the areas to critique. "
-        f"Guidance: {audit_scoring_context_json}\n\n"
-        "To help you determine the intent of the user search query you will also be provided with a query fan-out "
-        "comprising of 10 sets of related keywords as part of each request.\n"
+        f"Guidance: {audit_scoring_context_json}\n"
         "</extra input> \n\n"
     )
 
 # ─────────────────────────────────────────────────────────────
-# 7) One audit run (strict JSON schema, 7 criteria)
+# 7) Audit run
 # ─────────────────────────────────────────────────────────────
-async def audit_page(url: str, user_query: str, audit_context: str, debug: bool) -> Optional[pd.DataFrame]:
-    content = await fetch_webpage_rich_content(url, debug)
+def audit_page(url: str, user_query: str, audit_context: str, debug: bool) -> Optional[pd.DataFrame]:
+    content = fetch_webpage_rich_content(url, debug)
     if content is None:
         return None
-
     fan_out = generate_unbranded_queries(user_query, debug)
-    text_preview = content["text"][:4000]  # keep prompt size sane
+    text_preview = content["text"][:4000]
 
     user_prompt = f"""
 Run a page audit for LLM/GEO visibility.
 
 User query: {user_query}
-
 Query fan-out: {fan_out}
 
 Page title: {content['title']}
@@ -281,7 +210,6 @@ First 30 links: {content['links'][:30]}
 Page text (truncated):
 {text_preview}
 """
-
     try:
         resp = client.chat.completions.create(
             model=MODEL_NAME,
@@ -321,21 +249,16 @@ Page text (truncated):
         return df
     except Exception as e:
         st.error(f"❌ LLM JSON parse error: {e}")
-        try:
-            st.code(resp.choices[0].message.content, language="json")
-        except Exception:
-            pass
         return None
 
 # ─────────────────────────────────────────────────────────────
-# 8) Multi-run orchestration
+# 8) Multi-run + synthesis
 # ─────────────────────────────────────────────────────────────
-async def run_multi(url: str, prompt: str, n: int, audit_context: str, debug: bool) -> pd.DataFrame:
+def run_multi(url: str, prompt: str, n: int, audit_context: str, debug: bool) -> pd.DataFrame:
     frames = []
     progress = st.progress(0.0, text="Auditing…")
     for i in range(n):
-        dbg(debug, f"—— Run {i+1}/{n} ——")
-        df = await audit_page(url, prompt, audit_context, debug)
+        df = audit_page(url, prompt, audit_context, debug)
         if df is not None and not df.empty:
             df["Run"] = i + 1
             frames.append(df)
@@ -345,19 +268,12 @@ async def run_multi(url: str, prompt: str, n: int, audit_context: str, debug: bo
         return pd.DataFrame(columns=["Area", "Score", "Justification", "Action-to-take", "Run"])
     return pd.concat(frames, ignore_index=True)
 
-# ─────────────────────────────────────────────────────────────
-# 9) Synthesis: align justifications with recommendations
-# ─────────────────────────────────────────────────────────────
 def synthesize_justifications_and_recommendations(df: pd.DataFrame, debug: bool) -> pd.DataFrame:
-    by_area = (
-        df.groupby("Area")
-        .agg(
-            Avg_Score=("Score", "mean"),
-            Justifications=("Justification", list),
-            Actions=("Action-to-take", list),
-        )
-        .reset_index()
-    )
+    by_area = df.groupby("Area").agg(
+        Avg_Score=("Score", "mean"),
+        Justifications=("Justification", list),
+        Actions=("Action-to-take", list),
+    ).reset_index()
 
     rows = []
     for _, r in by_area.iterrows():
@@ -366,21 +282,9 @@ def synthesize_justifications_and_recommendations(df: pd.DataFrame, debug: bool)
         sys = "You are an expert auditor. Align justifications with actionable recommendations."
         usr = f"""
 Audit Area: {area}
-
-Combine and ALIGN these justifications and actions:
 Justifications: {json.dumps(r['Justifications'], ensure_ascii=False, indent=2)}
 Actions: {json.dumps(r['Actions'], ensure_ascii=False, indent=2)}
-
-Rules:
-- Produce a single concise justification (2–4 sentences) that logically supports the actions.
-- Produce 3–6 concrete, non-duplicative, prioritized actions.
-- Ensure every action is defensible by the justification.
-
-Return JSON:
-{{
-  "justification": "string",
-  "recommendations": ["bullet 1", "bullet 2", ...]
-}}
+Return JSON with "justification" and "recommendations" (array of 3-6).
 """
         try:
             resp = client.chat.completions.create(
@@ -398,7 +302,6 @@ Return JSON:
                 "Synthesized Recommendation": recs_txt.strip(),
             })
         except Exception as e:
-            dbg(debug, f"Synthesis error for {area}: {e}")
             rows.append({
                 "Area": area,
                 "Avg Score": avg_score,
@@ -406,11 +309,10 @@ Return JSON:
                 "Synthesized Recommendation": "",
             })
 
-    out = pd.DataFrame(rows).sort_values("Area").reset_index(drop=True)
-    return out
+    return pd.DataFrame(rows).sort_values("Area").reset_index(drop=True)
 
 # ─────────────────────────────────────────────────────────────
-# 10) UI
+# 9) Streamlit UI
 # ─────────────────────────────────────────────────────────────
 st.title("🔎 Single Page GEO Audit")
 st.caption("Analyze a single page for LLM/GEO readiness.")
@@ -428,18 +330,16 @@ n_runs = st.slider("Number of Runs", min_value=1, max_value=10, value=3)
 if st.button("Run Analysis", type="primary"):
     url = normalize_url(url_input)
     with st.spinner("Calibrating…"):
-        continuum = generate_theme_calibration(topic, prompt, debug)  # hidden
+        continuum = generate_theme_calibration(topic, prompt, debug)
         audit_context = build_audit_context(continuum)
 
     with st.spinner("Running audits…"):
-        results_df = run_async(run_multi(url, prompt, n_runs, audit_context, debug))
+        results_df = run_multi(url, prompt, n_runs, audit_context, debug)
 
     if results_df.empty:
-        st.error("No results returned. Check the visible errors above (scrape/JSON). Try a simpler URL like https://example.com.")
+        st.error("No results returned. Check network or LLM output.")
     else:
-        # Average overall score across all runs/areas
         overall_avg_pct = (results_df["Score"].mean() / 10.0) * 100.0
-
         st.subheader("Run Summary")
         st.table(pd.DataFrame([{
             "URL": url,
@@ -452,6 +352,3 @@ if st.button("Run Analysis", type="primary"):
         st.subheader("Consolidated Results (7 areas)")
         consolidated = synthesize_justifications_and_recommendations(results_df, debug)
         st.dataframe(consolidated, use_container_width=True)
-
-
-
