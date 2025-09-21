@@ -194,7 +194,6 @@ Return 1–3 lines only.
     resp = client.chat.completions.create(
         model=MODEL_NAME,
         messages=[{"role": "system", "content": sys}, {"role": "user", "content": usr}],
-        temperature=0.7,
     )
     continuum = resp.choices[0].message.content.strip()
     dbg(debug, f"(hidden continuum) {continuum}")
@@ -209,7 +208,6 @@ def generate_unbranded_queries(prompt: str, debug: bool) -> List[str]:
         model=MODEL_NAME,
         messages=[{"role": "system", "content": sys},
                   {"role": "user", "content": f"Original prompt: {prompt}"}],
-        temperature=0.2,
     )
     lines = [l.strip(" .") for l in resp.choices[0].message.content.split("\n") if l.strip()]
     lines = lines[:10]
@@ -316,7 +314,6 @@ Page text (truncated):
                     }
                 }
             },
-            temperature=0.2,
         )
         payload = json.loads(resp.choices[0].message.content)
         df = pd.DataFrame(payload["criteria"])
@@ -390,7 +387,6 @@ Return JSON:
                 model=MODEL_NAME,
                 messages=[{"role": "system", "content": sys}, {"role": "user", "content": usr}],
                 response_format={"type": "json_object"},
-                temperature=0.2,
             )
             data = json.loads(resp.choices[0].message.content)
             recs = data.get("recommendations", [])
@@ -456,3 +452,4 @@ if st.button("Run Analysis", type="primary"):
         st.subheader("Consolidated Results (7 areas)")
         consolidated = synthesize_justifications_and_recommendations(results_df, debug)
         st.dataframe(consolidated, use_container_width=True)
+
