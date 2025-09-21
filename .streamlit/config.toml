@@ -1,5 +1,1 @@
-[server]
-headless = true
 
-[global]
-postInstallScript = "./playwright_setup.sh"
